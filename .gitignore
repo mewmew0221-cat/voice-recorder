@@ -1,0 +1,17 @@
+# Secrets / env / personal notes（包含 GAS 部署網址等敏感資訊）
+.env
+.env.local
+.env*.local
+*.key
+secrets.json
+gas/*.txt
+**/notes.txt
+**/credentials*
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+*~
+.vscode/
+.idea/
