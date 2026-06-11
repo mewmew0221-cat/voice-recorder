@@ -138,10 +138,11 @@ const CATEGORY_CONFIG = {
 /* =============================================================
  * 2. 常數
  * ============================================================= */
-const SHEET_RECORDS = 'records';
-const SHEET_TODOS   = 'todos';
-const SHEET_CONFIG  = 'config';
-const SHEET_PROMPTS = 'prompts';
+const SHEET_RECORDS  = 'records';
+const SHEET_TODOS    = 'todos';
+const SHEET_CONFIG   = 'config';
+const SHEET_PROMPTS  = 'prompts';
+const SHEET_FEEDBACK = 'feedback';
 
 const RECORDS_HEADERS = ['id', 'timestamp', 'category', 'title', 'raw_text', 'processed_text', 'tags', 'status', 'created_by'];
 const TODOS_HEADERS   = ['id', 'record_id', 'content', 'assignee', 'due_hint', 'done', 'created_at'];
@@ -154,6 +155,11 @@ const CONFIG_HEADERS  = ['key', 'value', 'updated_at'];
 //   active    TRUE = 啟用此版；同分類請只留一個 TRUE
 //   updated_at / note  備註
 const PROMPTS_HEADERS = ['category', 'label', 'version', 'prompt', 'active', 'updated_at', 'note'];
+// feedback：優化素材。每筆紀錄首次被編輯時記下「AI 原稿 vs 人工修正」。
+//   ai_output    第一次編輯前的內容（即 AI 原始產出，之後不再變動）
+//   user_edited  目前最新的人工修正版（每次再編輯會更新）
+//   edited_count 累計編輯次數
+const FEEDBACK_HEADERS = ['id', 'record_id', 'category', 'ai_output', 'user_edited', 'edited_count', 'created_at', 'updated_at'];
 
 const DEFAULT_GEMINI_MODEL = 'gemini-2.0-flash-lite';
 const DEFAULT_CLAUDE_MODEL = 'claude-sonnet-4-20250514';
@@ -181,6 +187,7 @@ function doGet(e) {
       case 'list':       return jsonOutput({ success: true, records: listRecords(p) });
       case 'get':        return jsonOutput({ success: true, record: getRecord(p.id) });
       case 'todos':      return jsonOutput({ success: true, todos: listTodos(p) });
+      case 'feedback':   return jsonOutput({ success: true, feedback: listFeedback(p) });
       default:           return jsonOutput({ success: false, error: 'unknown action: ' + action });
     }
   } catch (err) {
@@ -262,7 +269,15 @@ function handleUpdate(body) {
   for (let r = 1; r < data.length; r++) {
     if (String(data[r][col.id]) === String(id)) {
       const rowNum = r + 1; // 1-based，含表頭
-      if (body.processed_text !== undefined) sheet.getRange(rowNum, col.processed_text + 1).setValue(body.processed_text);
+      if (body.processed_text !== undefined) {
+        const oldText = String(data[r][col.processed_text] || '');
+        const newText = String(body.processed_text);
+        // 內容有變動才記錄回饋（AI 原稿 vs 人工修正），供日後優化提示詞
+        if (newText !== oldText) {
+          recordFeedback(id, String(data[r][col.category] || ''), oldText, newText);
+        }
+        sheet.getRange(rowNum, col.processed_text + 1).setValue(body.processed_text);
+      }
       if (body.title !== undefined)          sheet.getRange(rowNum, col.title + 1).setValue(body.title);
       if (body.tags !== undefined) {
         const t = Array.isArray(body.tags) ? body.tags.join(' ') : body.tags;
@@ -272,6 +287,33 @@ function handleUpdate(body) {
     }
   }
   return { success: false, error: 'record not found: ' + id };
+}
+
+/**
+ * 記錄編輯回饋：首次編輯時 ai_output 存 AI 原稿，之後僅更新 user_edited 與次數。
+ * 失敗不影響主流程（靜默）。
+ */
+function recordFeedback(recordId, category, aiOutput, userEdited) {
+  try {
+    const sheet = getSheet(SHEET_FEEDBACK, FEEDBACK_HEADERS);
+    const data = sheet.getDataRange().getValues();
+    const col = headerIndex(FEEDBACK_HEADERS);
+    const now = new Date().toISOString();
+
+    for (let r = 1; r < data.length; r++) {
+      if (String(data[r][col.record_id]) === String(recordId)) {
+        const cnt = (parseInt(data[r][col.edited_count], 10) || 1) + 1;
+        sheet.getRange(r + 1, col.user_edited + 1).setValue(userEdited);
+        sheet.getRange(r + 1, col.edited_count + 1).setValue(cnt);
+        sheet.getRange(r + 1, col.updated_at + 1).setValue(now);
+        return;
+      }
+    }
+    // 首次編輯：ai_output = 編輯前內容（即 AI 原始產出）
+    sheet.appendRow([uuid(), recordId, category, aiOutput, userEdited, 1, now, now]);
+  } catch (err) {
+    // 靜默：回饋記錄失敗不應阻斷儲存
+  }
 }
 
 /** 刪除一筆紀錄（連同其關聯的待辦事項） */
@@ -411,6 +453,34 @@ function listTodos(p) {
   const filtered = (wantDone === null) ? rows : rows.filter(function (t) { return t.done === wantDone; });
   filtered.reverse();
   return filtered;
+}
+
+/** 列出編輯回饋（優化素材）。可用 ?action=feedback&category=ward_round 篩選分類。 */
+function listFeedback(p) {
+  const sheet = getSheet(SHEET_FEEDBACK, FEEDBACK_HEADERS);
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return [];
+
+  const col = headerIndex(FEEDBACK_HEADERS);
+  const category = p && p.category;
+
+  const rows = data.slice(1).map(function (row) {
+    return {
+      id: row[col.id],
+      record_id: row[col.record_id],
+      category: row[col.category],
+      ai_output: row[col.ai_output],
+      user_edited: row[col.user_edited],
+      edited_count: row[col.edited_count],
+      created_at: row[col.created_at],
+      updated_at: row[col.updated_at]
+    };
+  }).filter(function (f) {
+    return !category || category === 'all' || f.category === category;
+  });
+
+  rows.reverse();
+  return rows;
 }
 
 
@@ -592,8 +662,9 @@ function initSheets() {
   getSheet(SHEET_RECORDS, RECORDS_HEADERS);
   getSheet(SHEET_TODOS, TODOS_HEADERS);
   getSheet(SHEET_CONFIG, CONFIG_HEADERS);
+  getSheet(SHEET_FEEDBACK, FEEDBACK_HEADERS);
   initPrompts();
-  Logger.log('已建立 / 確認 Sheet：records, todos, config, prompts');
+  Logger.log('已建立 / 確認 Sheet：records, todos, config, prompts, feedback');
 }
 
 /**
