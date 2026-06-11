@@ -117,6 +117,17 @@
   .field input:focus { border-color: var(--accent-dim); }
   .btn-primary { width: 100%; padding: 14px; border: none; border-radius: 12px; background: var(--accent); color: #06201E; font-weight: 700; font-size: 15px; cursor: pointer; font-family: inherit; }
 
+  /* 優化 modal */
+  .modal-wide { width: 680px; max-height: 88vh; overflow-y: auto; }
+  select { width: 100%; background: var(--bg-input); border: 1px solid var(--border); color: var(--text); border-radius: 11px; padding: 12px 14px; font-size: 14px; font-family: inherit; outline: none; }
+  .opt-stat { font-size: 13px; color: var(--accent); background: rgba(78,205,196,0.08); border: 1px solid var(--accent-dim); border-radius: 10px; padding: 10px 14px; }
+  .opt-analysis { font-family: 'JetBrains Mono', monospace; font-size: 12.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; color: var(--text-dim); background: var(--bg-input); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin: 0; max-height: 180px; overflow-y: auto; }
+  .opt-edit { width: 100%; min-height: 220px; background: var(--bg-input); border: 1px solid var(--accent-dim); color: var(--text); border-radius: 10px; padding: 14px; font-family: 'JetBrains Mono', monospace; font-size: 12.5px; line-height: 1.65; resize: vertical; outline: none; box-sizing: border-box; }
+  .opt-current { margin-top: 6px; }
+  .opt-current summary { cursor: pointer; font-size: 13px; color: var(--text-dim); padding: 6px 0; }
+  .opt-current pre { font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; color: var(--text-dim); background: var(--bg-input); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin: 8px 0 0; max-height: 200px; overflow-y: auto; }
+  .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+
   .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(20px); background: var(--accent); color: #06201E; font-weight: 600; font-size: 14px; padding: 12px 22px; border-radius: 30px; opacity: 0; pointer-events: none; transition: .3s; z-index: 80; }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 </style>
@@ -127,7 +138,10 @@
     <aside>
       <div class="side-head">
         <div class="brand"><span class="dot"></span> <div>MedNote<small>Dashboard</small></div></div>
-        <button class="icon-btn" id="btnSettings" title="設定">⚙</button>
+        <div style="display:flex;gap:8px;">
+          <button class="icon-btn" id="btnOptimize" title="提示詞優化">🧬</button>
+          <button class="icon-btn" id="btnSettings" title="設定">⚙</button>
+        </div>
       </div>
 
       <div class="side-section">
@@ -180,6 +194,44 @@
         <input type="text" id="setToken" placeholder="與 GAS 端 APP_TOKEN 相同的字串" />
       </div>
       <button class="btn-primary" id="btnSaveSettings">儲存設定</button>
+    </div>
+  </div>
+
+  <!-- 提示詞優化 -->
+  <div class="modal-overlay" id="optimizeModal">
+    <div class="modal modal-wide">
+      <h2>🧬 提示詞優化</h2>
+      <p class="hint">根據你的編輯紀錄（AI 原稿 vs 修正版），由 AI 分析並提議改進的提示詞。<strong>需經你審核後才會套用。</strong></p>
+
+      <div class="field">
+        <label>選擇分類</label>
+        <select id="optCategory"></select>
+      </div>
+      <button class="btn-primary" id="btnAnalyze">分析並提議新版</button>
+
+      <div id="optResult" style="display:none;margin-top:20px;">
+        <div class="opt-stat" id="optStat"></div>
+
+        <div class="field" style="margin-top:14px;">
+          <label>AI 分析（發現的修改模式）</label>
+          <pre class="opt-analysis" id="optAnalysis"></pre>
+        </div>
+
+        <div class="field">
+          <label>建議的新提示詞（可再編輯後套用）</label>
+          <textarea class="opt-edit" id="optSuggested"></textarea>
+        </div>
+
+        <details class="opt-current">
+          <summary>對照：目前生效的提示詞</summary>
+          <pre id="optCurrent"></pre>
+        </details>
+
+        <div style="display:flex;gap:10px;margin-top:16px;">
+          <button class="btn-primary" id="btnApply" style="flex:1;">✓ 套用為新版本</button>
+          <button class="card-btn" id="btnOptCancel">取消</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -479,6 +531,67 @@
   $('settingsModal').addEventListener('click', (e) => { if (e.target.id === 'settingsModal') e.currentTarget.classList.remove('open'); });
   $('btnSaveSettings').addEventListener('click', saveSettings);
   $('btnMore').addEventListener('click', loadMore);
+
+  // ---- 提示詞優化（C1：分析 → 提議 → 人工審核 → 套用）----
+  let optCurrentCategory = null;
+
+  function openOptimize() {
+    if (!getCfg().url) { openSettings(); return; }
+    const sel = $('optCategory');
+    sel.innerHTML = categories.map((c) => '<option value="' + c.key + '">' + escapeHtml(c.label) + '</option>').join('');
+    $('optResult').style.display = 'none';
+    $('btnAnalyze').disabled = false;
+    $('btnAnalyze').textContent = '分析並提議新版';
+    $('optimizeModal').classList.add('open');
+  }
+
+  async function analyze() {
+    const category = $('optCategory').value;
+    if (!category) return;
+    const btn = $('btnAnalyze');
+    btn.disabled = true;
+    btn.textContent = 'AI 分析中…（約需數秒）';
+    $('optResult').style.display = 'none';
+    try {
+      const data = await apiPost({ action: 'optimize', category: category });
+      if (!data.success) throw new Error(data.error || '分析失敗');
+      optCurrentCategory = category;
+      $('optStat').textContent = '已分析 ' + data.sample_count + ' 筆編輯對照（此分類共 ' + data.total_feedback + ' 筆回饋）';
+      $('optAnalysis').textContent = data.analysis || '（AI 未提供分析段落，請參考下方建議）';
+      $('optSuggested').value = data.suggested_prompt || '';
+      $('optCurrent').textContent = data.current_prompt || '';
+      $('optResult').style.display = 'block';
+    } catch (err) {
+      showToast('✗ ' + (err.message || err));
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '重新分析';
+    }
+  }
+
+  async function applyPrompt() {
+    const prompt = $('optSuggested').value.trim();
+    if (!prompt) { showToast('✗ 新提示詞不可空白'); return; }
+    if (!confirm('確定將此提示詞套用為「' + labelFor(optCurrentCategory) + '」的新版本？\n舊版會自動停用（仍可在 prompts 表回溯）。')) return;
+    const btn = $('btnApply');
+    btn.disabled = true;
+    try {
+      const data = await apiPost({ action: 'apply_prompt', category: optCurrentCategory, prompt: prompt, note: 'C1 優化建議套用' });
+      if (!data.success) throw new Error(data.error || '套用失敗');
+      showToast('✓ 已套用為 v' + data.version);
+      $('optimizeModal').classList.remove('open');
+    } catch (err) {
+      showToast('✗ ' + (err.message || err));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  $('btnOptimize').addEventListener('click', openOptimize);
+  $('btnAnalyze').addEventListener('click', analyze);
+  $('btnApply').addEventListener('click', applyPrompt);
+  $('btnOptCancel').addEventListener('click', () => $('optimizeModal').classList.remove('open'));
+  $('optimizeModal').addEventListener('click', (e) => { if (e.target.id === 'optimizeModal') e.currentTarget.classList.remove('open'); });
 
   async function init() {
     if (!getCfg().url) { openSettings(); return; }

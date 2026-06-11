@@ -202,11 +202,13 @@ function doPost(e) {
 
     const action = body.action || 'submit';
     switch (action) {
-      case 'submit':    return jsonOutput(handleSubmit(body));
-      case 'update':    return jsonOutput(handleUpdate(body));
-      case 'delete':    return jsonOutput(handleDelete(body));
-      case 'todo_done': return jsonOutput(handleTodoDone(body));
-      default:          return jsonOutput({ success: false, error: 'unknown action: ' + action });
+      case 'submit':       return jsonOutput(handleSubmit(body));
+      case 'update':       return jsonOutput(handleUpdate(body));
+      case 'delete':       return jsonOutput(handleDelete(body));
+      case 'todo_done':    return jsonOutput(handleTodoDone(body));
+      case 'optimize':     return jsonOutput(handleOptimize(body));
+      case 'apply_prompt': return jsonOutput(handleApplyPrompt(body));
+      default:             return jsonOutput({ success: false, error: 'unknown action: ' + action });
     }
   } catch (err) {
     return jsonOutput({ success: false, error: String(err) });
@@ -512,6 +514,114 @@ function getActivePrompt(category) {
     // 讀取失敗就靜默回退到內建預設
   }
   return CATEGORY_CONFIG[category] ? CATEGORY_CONFIG[category].prompt : '';
+}
+
+
+/* =============================================================
+ * 5c. 提示詞優化（C1 半自動：AI 分析回饋 → 提議新版，人工審核後套用）
+ * ============================================================= */
+
+/** 分析該分類的編輯回饋，請 AI 提議改進版提示詞（不直接寫入，待人工審核） */
+function handleOptimize(body) {
+  const category = body.category;
+  if (!category) return { success: false, error: 'category is required' };
+  if (!CATEGORY_CONFIG[category]) return { success: false, error: 'unknown category: ' + category };
+
+  const current = getActivePrompt(category);
+
+  const all = listFeedback({ category: category });
+  const samples = all.filter(function (f) {
+    const a = String(f.ai_output || '').trim();
+    const u = String(f.user_edited || '').trim();
+    return a && u && a !== u;
+  });
+  if (samples.length === 0) {
+    return { success: false, error: '此分類目前沒有可供分析的編輯回饋，請先累積一些編輯紀錄。' };
+  }
+
+  const use = samples.slice(0, 15); // 控制 token 用量
+  let pairs = '';
+  use.forEach(function (f, i) {
+    pairs += '\n----- 範例 ' + (i + 1) + ' -----\n'
+      + '[AI 原稿]\n' + f.ai_output + '\n\n'
+      + '[醫師修正後]\n' + f.user_edited + '\n';
+  });
+
+  const meta =
+    '你是一位提示詞工程專家，負責優化醫療文字整理系統的提示詞。\n'
+    + '以下提供某分類「目前使用的提示詞」，以及多筆「AI 依此提示詞產出的原稿」與「醫師實際修正後版本」的對照。\n'
+    + '請分析醫師反覆修改的模式（格式、用詞、保留或刪除的內容、結構等），找出 AI 系統性的不足，提出改進後的提示詞。\n\n'
+    + '要求：\n'
+    + '1. 只在必要處修改，保留原提示詞的整體結構與意圖\n'
+    + '2. 著重「反覆出現」的模式，不要過擬合到個別案例\n'
+    + '3. 嚴格依下列格式輸出，兩段都必須有：\n'
+    + '===分析===\n（以條列說明你發現的模式與修改理由）\n'
+    + '===新提示詞===\n（完整的新提示詞全文，可直接使用，不要加引號或程式碼框）\n\n'
+    + '【目前的提示詞】\n' + current + '\n\n'
+    + '【編輯對照，共 ' + use.length + ' 筆】' + pairs;
+
+  let raw;
+  try {
+    raw = callAI(meta, '（請依上述對照進行分析並提出新提示詞）');
+  } catch (err) {
+    return { success: false, error: 'AI 呼叫失敗：' + String(err) };
+  }
+
+  const parsed = parseOptimizeOutput(raw);
+  return {
+    success: true,
+    category: category,
+    current_prompt: current,
+    analysis: parsed.analysis,
+    suggested_prompt: parsed.suggested,
+    sample_count: use.length,
+    total_feedback: samples.length
+  };
+}
+
+/** 解析 meta-prompt 輸出的「分析」與「新提示詞」兩段 */
+function parseOptimizeOutput(text) {
+  const t = String(text || '');
+  const pMark = t.indexOf('===新提示詞===');
+  if (pMark !== -1) {
+    const aMark = t.indexOf('===分析===');
+    const analysis = aMark !== -1
+      ? t.substring(aMark + '===分析==='.length, pMark).trim()
+      : '';
+    const suggested = t.substring(pMark + '===新提示詞==='.length).trim();
+    return { analysis: analysis, suggested: suggested };
+  }
+  return { analysis: '', suggested: t.trim() }; // 解析失敗 → 全當新提示詞
+}
+
+/** 審核通過後套用：寫入 prompts sheet 成為新版本並 active，舊版自動停用 */
+function handleApplyPrompt(body) {
+  const category = body.category;
+  const newPrompt = body.prompt;
+  if (!category || !String(newPrompt || '').trim()) {
+    return { success: false, error: 'category 與 prompt 為必填' };
+  }
+
+  const sheet = getSheet(SHEET_PROMPTS, PROMPTS_HEADERS);
+  const data = sheet.getDataRange().getValues();
+  const col = headerIndex(PROMPTS_HEADERS);
+
+  let maxVer = 0;
+  let label = '';
+  for (let r = 1; r < data.length; r++) {
+    if (String(data[r][col.category]) !== String(category)) continue;
+    const ver = parseInt(data[r][col.version], 10) || 0;
+    if (ver > maxVer) maxVer = ver;
+    if (data[r][col.label]) label = data[r][col.label];
+    const activeVal = data[r][col.active];
+    const active = activeVal === true || String(activeVal).toLowerCase() === 'true';
+    if (active) sheet.getRange(r + 1, col.active + 1).setValue(false); // 停用舊版
+  }
+  if (!label) label = (CATEGORY_CONFIG[category] && CATEGORY_CONFIG[category].label) || category;
+
+  const now = new Date().toISOString();
+  sheet.appendRow([category, label, maxVer + 1, newPrompt, true, now, body.note || 'C1 優化建議套用']);
+  return { success: true, category: category, version: maxVer + 1 };
 }
 
 
