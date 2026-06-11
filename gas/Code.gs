@@ -141,10 +141,19 @@ const CATEGORY_CONFIG = {
 const SHEET_RECORDS = 'records';
 const SHEET_TODOS   = 'todos';
 const SHEET_CONFIG  = 'config';
+const SHEET_PROMPTS = 'prompts';
 
 const RECORDS_HEADERS = ['id', 'timestamp', 'category', 'title', 'raw_text', 'processed_text', 'tags', 'status', 'created_by'];
 const TODOS_HEADERS   = ['id', 'record_id', 'content', 'assignee', 'due_hint', 'done', 'created_at'];
 const CONFIG_HEADERS  = ['key', 'value', 'updated_at'];
+// prompts：提示詞外部化。可直接在此 sheet 手動編輯，下次送出即生效。
+//   category  分類 key（對應 CATEGORY_CONFIG）
+//   label     顯示名稱（僅備註用，前端分類仍以程式碼為準）
+//   version   版本號（同分類可有多版，取 active=TRUE 中 version 最大者）
+//   prompt    提示詞內容（儲存格內用 Alt+Enter 換行）
+//   active    TRUE = 啟用此版；同分類請只留一個 TRUE
+//   updated_at / note  備註
+const PROMPTS_HEADERS = ['category', 'label', 'version', 'prompt', 'active', 'updated_at', 'note'];
 
 const DEFAULT_GEMINI_MODEL = 'gemini-2.0-flash-lite';
 const DEFAULT_CLAUDE_MODEL = 'claude-sonnet-4-20250514';
@@ -217,7 +226,9 @@ function handleSubmit(body) {
   let processed = '';
   let status = 'processed';
   try {
-    processed = callAI(cfg.prompt, raw);
+    // 提示詞優先取自 prompts sheet 的 active 版本，沒有才用程式碼內建預設
+    const promptText = getActivePrompt(category);
+    processed = callAI(promptText, raw);
     if (!processed || !processed.trim()) {
       processed = raw;
       status = 'raw';           // AI 回傳空白 → 退回原始文字
@@ -404,6 +415,37 @@ function listTodos(p) {
 
 
 /* =============================================================
+ * 5b. 提示詞來源（prompts sheet 優先，程式碼內建為後備）
+ * ============================================================= */
+/**
+ * 取得某分類目前生效的提示詞。
+ * 規則：prompts sheet 中該分類 active=TRUE 且 version 最大者；
+ *       找不到（或內容空白）則回退至程式碼內建的 CATEGORY_CONFIG。
+ */
+function getActivePrompt(category) {
+  try {
+    const sheet = getSheet(SHEET_PROMPTS, PROMPTS_HEADERS);
+    const data = sheet.getDataRange().getValues();
+    const col = headerIndex(PROMPTS_HEADERS);
+    let best = null;
+    for (let r = 1; r < data.length; r++) {
+      if (String(data[r][col.category]) !== String(category)) continue;
+      const activeVal = data[r][col.active];
+      const active = activeVal === true || String(activeVal).toLowerCase() === 'true';
+      if (!active) continue;
+      const ver = parseInt(data[r][col.version], 10) || 0;
+      const text = String(data[r][col.prompt] || '');
+      if (text.trim() && (!best || ver > best.ver)) best = { ver: ver, prompt: text };
+    }
+    if (best) return best.prompt;
+  } catch (err) {
+    // 讀取失敗就靜默回退到內建預設
+  }
+  return CATEGORY_CONFIG[category] ? CATEGORY_CONFIG[category].prompt : '';
+}
+
+
+/* =============================================================
  * 6. AI Provider 抽象層
  * ============================================================= */
 function callAI(prompt, text) {
@@ -543,12 +585,37 @@ function getSheet(name, headers) {
 
 /* =============================================================
  * 8. 一次性初始化（部署後可在編輯器中手動執行一次）
- *    建立三個 Sheet 並寫入表頭。API Key 等敏感設定請改用
+ *    建立各 Sheet 並寫入表頭。API Key 等敏感設定請改用
  *    「專案設定 → Script Properties」介面新增，勿寫死於程式碼。
  * ============================================================= */
 function initSheets() {
   getSheet(SHEET_RECORDS, RECORDS_HEADERS);
   getSheet(SHEET_TODOS, TODOS_HEADERS);
   getSheet(SHEET_CONFIG, CONFIG_HEADERS);
-  Logger.log('已建立 / 確認三個 Sheet：records, todos, config');
+  initPrompts();
+  Logger.log('已建立 / 確認 Sheet：records, todos, config, prompts');
+}
+
+/**
+ * 把程式碼內建的 CATEGORY_CONFIG 提示詞匯入 prompts sheet（version 1, active）。
+ * 安全設計：已存在的分類「不覆蓋」，避免蓋掉你在 sheet 上手動改過的內容。
+ * 之後新增分類時可再執行一次，只會補上缺少的。
+ */
+function initPrompts() {
+  const sheet = getSheet(SHEET_PROMPTS, PROMPTS_HEADERS);
+  const data = sheet.getDataRange().getValues();
+  const col = headerIndex(PROMPTS_HEADERS);
+
+  const have = {};
+  for (let r = 1; r < data.length; r++) have[String(data[r][col.category])] = true;
+
+  const now = new Date().toISOString();
+  let added = 0;
+  Object.keys(CATEGORY_CONFIG).forEach(function (key) {
+    if (have[key]) return; // 已存在 → 保留使用者版本，不動
+    const c = CATEGORY_CONFIG[key];
+    sheet.appendRow([key, c.label, 1, c.prompt, true, now, '由程式碼預設匯入']);
+    added++;
+  });
+  Logger.log('initPrompts：新增 ' + added + ' 筆提示詞（已存在者保留不變）');
 }
