@@ -91,6 +91,16 @@
   .tags-row { margin-top: 12px; }
   .tag { display: inline-block; font-size: 11px; color: var(--text-dim); background: var(--bg-input); border-radius: 6px; padding: 2px 8px; margin: 0 6px 6px 0; }
 
+  /* 編輯 / 刪除操作 */
+  .card-actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+  .card-btn { background: var(--bg-input); border: 1px solid var(--border); color: var(--text-dim); padding: 8px 14px; border-radius: 9px; font-size: 13px; cursor: pointer; font-family: inherit; transition: .15s; }
+  .card-btn:hover { color: var(--accent); border-color: var(--accent-dim); }
+  .card-btn.btn-del:hover { color: var(--warn); border-color: var(--warn); }
+  .card-btn.btn-save { background: var(--accent); color: #06201E; border-color: var(--accent); font-weight: 600; }
+  .card-btn.btn-save:hover { color: #06201E; opacity: .9; }
+  .card-btn:disabled { opacity: .5; cursor: not-allowed; }
+  .edit-area { width: 100%; min-height: 240px; background: var(--bg-input); border: 1px solid var(--accent-dim); color: var(--text); border-radius: 10px; padding: 14px; font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.65; resize: vertical; outline: none; margin-top: 14px; box-sizing: border-box; }
+
   .load-more { display: block; margin: 8px auto 0; background: var(--bg-elev); border: 1px solid var(--border); color: var(--text-dim); padding: 11px 28px; border-radius: 11px; font-size: 14px; cursor: pointer; font-family: inherit; transition: .15s; }
   .load-more:hover { color: var(--accent); border-color: var(--accent-dim); }
   .empty { text-align: center; color: var(--text-dim); padding: 60px 20px; font-size: 15px; }
@@ -293,6 +303,7 @@
   function renderCard(r) {
     const card = document.createElement('div');
     card.className = 'card';
+    card.dataset.id = r.id;
 
     const isRaw = r.status === 'raw';
     const tags = (r.tags || '').split(/\s+/).filter(Boolean);
@@ -312,11 +323,88 @@
         '<span class="chev">▶</span>' +
       '</div>' +
       '<div class="card-body"><div class="card-body-inner">' +
-        '<pre>' + escapeHtml(r.processed_text || r.raw_text || '') + '</pre>' +
-        tagsHtml +
+        '<div class="view-mode">' +
+          '<pre></pre>' + tagsHtml +
+          '<div class="card-actions">' +
+            '<button class="card-btn btn-edit">✏️ 編輯</button>' +
+            '<button class="card-btn btn-copy">📋 複製</button>' +
+            '<button class="card-btn btn-del">🗑 刪除</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="edit-mode" style="display:none;">' +
+          '<textarea class="edit-area"></textarea>' +
+          '<div class="card-actions">' +
+            '<button class="card-btn btn-save">💾 保存</button>' +
+            '<button class="card-btn btn-cancel">取消</button>' +
+          '</div>' +
+        '</div>' +
       '</div></div>';
 
+    // 內容用 textContent 設定，避免 HTML 注入
+    const pre = card.querySelector('pre');
+    const textarea = card.querySelector('.edit-area');
+    pre.textContent = r.processed_text || r.raw_text || '';
+
+    const viewMode = card.querySelector('.view-mode');
+    const editMode = card.querySelector('.edit-mode');
+
     card.querySelector('.card-head').addEventListener('click', () => card.classList.toggle('open'));
+
+    // 編輯
+    card.querySelector('.btn-edit').addEventListener('click', () => {
+      textarea.value = pre.textContent;
+      viewMode.style.display = 'none';
+      editMode.style.display = 'block';
+      textarea.focus();
+    });
+    // 取消
+    card.querySelector('.btn-cancel').addEventListener('click', () => {
+      editMode.style.display = 'none';
+      viewMode.style.display = 'block';
+    });
+    // 複製
+    card.querySelector('.btn-copy').addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(pre.textContent); showToast('✓ 已複製'); }
+      catch (e) { showToast('✗ 複製失敗'); }
+    });
+    // 保存
+    card.querySelector('.btn-save').addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      const edited = textarea.value;
+      btn.disabled = true;
+      try {
+        const res = await apiPost({ action: 'update', id: r.id, processed_text: edited });
+        if (!res.success) throw new Error(res.error || '更新失敗');
+        pre.textContent = edited;
+        r.processed_text = edited;
+        editMode.style.display = 'none';
+        viewMode.style.display = 'block';
+        showToast('✓ 已儲存');
+      } catch (err) {
+        showToast('✗ 儲存失敗：' + (err.message || err));
+      } finally {
+        btn.disabled = false;
+      }
+    });
+    // 刪除
+    card.querySelector('.btn-del').addEventListener('click', async (ev) => {
+      if (!confirm('確定要刪除這筆紀錄嗎？此動作無法復原。')) return;
+      const btn = ev.currentTarget;
+      btn.disabled = true;
+      try {
+        const res = await apiPost({ action: 'delete', id: r.id });
+        if (!res.success) throw new Error(res.error || '刪除失敗');
+        card.style.transition = 'opacity .25s';
+        card.style.opacity = '0';
+        setTimeout(() => card.remove(), 250);
+        showToast('✓ 已刪除');
+        if (r.category === 'meeting') loadTodos(); // 連動更新待辦側欄
+      } catch (err) {
+        btn.disabled = false;
+        showToast('✗ 刪除失敗：' + (err.message || err));
+      }
+    });
+
     return card;
   }
 

@@ -107,6 +107,28 @@ const CATEGORY_CONFIG = {
       + '- 去除填充詞、重複確認語、非實質內容\n'
       + '- 保留所有醫療資訊、數值、決策，不得省略或推測\n'
       + '輸出純文字，不要加任何前言或後記。'
+  },
+
+  idea_note: {
+    label: '靈感筆記',
+    prompt: '你是一位忠實的筆記助手，負責整理隨手記下的靈感與點子。\n'
+      + '以下是語音轉錄的原始文字。請：\n'
+      + '1. 以條列方式呈現，一個想法一行（若想法有層次，可用縮排表現）\n'
+      + '2. 盡量保留輸入文本的原意與用字，不要過度改寫或潤飾\n'
+      + '3. 去除語助詞、口吃、重複、口誤等雜訊\n'
+      + '4. 不要替使用者延伸、補充或評論，也不要推測未說出口的內容\n'
+      + '5. 若有多個不相干的點子，各自獨立成一條\n'
+      + '輸出純文字，不要加任何前言或後記。'
+  },
+
+  text_note: {
+    label: '文字筆記',
+    prompt: '你是一位文字整理助手。以下是一段原始文字，請只做「最小幅度」的整理：\n'
+      + '1. 僅修正明顯的語音轉錄錯誤、贅字、口吃與重複\n'
+      + '2. 適當分段與斷行，讓格式清楚易讀\n'
+      + '3. 嚴格保留原文的所有內容、用字、語氣與順序，不得改寫、摘要、增刪或重新組織\n'
+      + '4. 不要加入任何標題、條列符號或評論\n'
+      + '輸出整理後的純文字即可，不要加任何說明。'
   }
 
   // 日後新增分類：在此加入新的 key 與對應設定即可。
@@ -166,6 +188,7 @@ function doPost(e) {
     switch (action) {
       case 'submit':    return jsonOutput(handleSubmit(body));
       case 'update':    return jsonOutput(handleUpdate(body));
+      case 'delete':    return jsonOutput(handleDelete(body));
       case 'todo_done': return jsonOutput(handleTodoDone(body));
       default:          return jsonOutput({ success: false, error: 'unknown action: ' + action });
     }
@@ -238,6 +261,38 @@ function handleUpdate(body) {
     }
   }
   return { success: false, error: 'record not found: ' + id };
+}
+
+/** 刪除一筆紀錄（連同其關聯的待辦事項） */
+function handleDelete(body) {
+  const id = body.id;
+  if (!id) return { success: false, error: 'id is required' };
+
+  const sheet = getSheet(SHEET_RECORDS, RECORDS_HEADERS);
+  const data = sheet.getDataRange().getValues();
+  const col = headerIndex(RECORDS_HEADERS);
+
+  let deleted = false;
+  for (let r = data.length - 1; r >= 1; r--) { // 由下往上刪，避免列號位移
+    if (String(data[r][col.id]) === String(id)) {
+      sheet.deleteRow(r + 1); // 1-based，含表頭
+      deleted = true;
+      break;
+    }
+  }
+  if (!deleted) return { success: false, error: 'record not found: ' + id };
+
+  // 連帶刪除關聯的待辦
+  const tSheet = getSheet(SHEET_TODOS, TODOS_HEADERS);
+  const tData = tSheet.getDataRange().getValues();
+  const tCol = headerIndex(TODOS_HEADERS);
+  for (let r = tData.length - 1; r >= 1; r--) {
+    if (String(tData[r][tCol.record_id]) === String(id)) {
+      tSheet.deleteRow(r + 1);
+    }
+  }
+
+  return { success: true, id: id };
 }
 
 /** 標記待辦完成 / 未完成 */
